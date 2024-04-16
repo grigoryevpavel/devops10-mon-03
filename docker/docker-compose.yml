@@ -1,0 +1,141 @@
+version: "2.3"
+
+services: 
+
+  es-hot:   
+    image:  elasticsearch:${STACK_VERSION}
+    container_name: es-hot
+    volumes: 
+      - esdata01:/usr/share/elasticsearch/data:Z
+    environment:
+      - node.name=es-hot
+      - cluster.name=${CLUSTER_NAME}
+      - cluster.initial_master_nodes=es-hot,es-warm
+      - discovery.seed_hosts=es-warm # if es-hot not available, discover es-warm as master
+      - node.roles=master,data_content,data_hot 
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD} #default user for elastic is elastic. prefered way
+      - bootstrap.memory_lock=true  #to switch off swapping on disk
+      - xpack.security.enabled=false
+      - "http.host=0.0.0.0"
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    mem_limit: ${ES_MEM_LIMIT}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1 
+      nofile:
+        soft: 65536
+        hard: 65536 
+    ports:
+      - ${ES_PORT}:${ES_PORT}
+    networks:
+      - elastic
+
+  es-warm:
+    depends_on: 
+      - es-hot      
+    image:  elasticsearch:${STACK_VERSION}
+    container_name: es-warm
+    volumes: 
+      - esdata02:/usr/share/elasticsearch/data:Z
+    environment:
+      - node.name=es-warm
+      - cluster.name=${CLUSTER_NAME}
+      - cluster.initial_master_nodes=es-hot,es-warm
+      - discovery.seed_hosts=es-hot # if es-warm not available, discover es-hot as master
+      - node.roles=master,data_warm
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD} #default user for elastic is elastic. prefered way
+      - bootstrap.memory_lock=true  #to switch off swapping on disk
+      - xpack.security.enabled=false 
+      - "http.host=0.0.0.0"
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    mem_limit: ${ES_MEM_LIMIT}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1 
+      nofile:
+        soft: 65536
+        hard: 65536  
+    networks:
+      - elastic 
+
+  kibana:
+    depends_on:
+      - es-hot  
+      - es-warm 
+    image:  kibana:${STACK_VERSION} 
+    container_name: kibana
+    ports:
+      - ${KIBANA_PORT}:${KIBANA_PORT}
+    environment:
+      - SERVERNAME=kibana 
+      - ELASTICSEARCH_HOSTS=["http://es-hot:${ES_PORT}","http://es-warm:${ES_PORT}"]
+    mem_limit: ${KB_MEM_LIMIT} 
+    networks:
+      - elastic 
+
+  logstash: 
+    depends_on:
+      - es-hot  
+      - es-warm 
+      - kibana 
+    image: logstash:${STACK_VERSION}
+    container_name: logstash
+    user: root
+    environment:  
+      - node.name=logstash
+      - ELASTICSEARCH_HOSTS=http://es-hot:${ES_PORT} # does not support arrays 
+      - ELASTICSEARCH_USERNAME=elastic #default user for elastic is elastic. prefered way
+      - ELASTICSEARCH_PASSWORD=${ELASTIC_PASSWORD}
+      - LOGSTASH_FB_PORT=${LOGSTASH_FB_PORT} 
+      - "LS_JAVA_OPTS=-Xms256m -Xmx256m"
+    ports:
+      - ${LOGSTASH_FB_PORT}:${LOGSTASH_FB_PORT}
+      - 5046:5046
+    volumes: 
+      - logstashdata01:/usr/share/logstash/data
+      - "./config/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:Z"
+      - "./config/logstash.yml:/opt/logstash/config/logstash.yml:Z"
+    networks:
+      - elastic 
+
+  filebeat: 
+    depends_on:
+      - es-hot  
+      - es-warm  
+    image:  elastic/filebeat:${STACK_VERSION}
+    container_name: filebeat  
+    user: root 
+    command: filebeat -e -strict.perms=false # needed for access to filebeat.yml file
+    volumes:
+      - filebeatdata01:/usr/share/filebeat/data
+      - "./config/filebeat.yml:/usr/share/filebeat/filebeat.yml:Z"
+      - "/var/snap/docker/common/var-lib-docker:/var/lib/docker:Z" # for snap docker default directory /var/snap/docker/common/var-lib-docker
+      - "/var/run/docker.sock:/var/run/docker.sock:Z" 
+    environment: 
+      - LOGSTASH_HOSTS="logstash:${LOGSTASH_FB_PORT}"
+    networks:
+      - elastic 
+
+  some_application:
+    image: mcr.microsoft.com/dotnet/aspnet:6.0 
+    container_name: some_app
+    working_dir: /opt # set working directory to load appsettings.json
+    volumes:
+      - ./myservice/:/opt/:Z
+    entrypoint:  ["dotnet", "/opt/ElasticPingApp.dll"]
+
+volumes: 
+  esdata01:
+    driver: local
+  esdata02:
+    driver: local 
+  logstashdata01:
+    driver: local
+  filebeatdata01:
+    driver: local 
+
+networks:
+  elastic:
+    driver: bridge
